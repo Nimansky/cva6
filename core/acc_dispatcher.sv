@@ -53,6 +53,7 @@ module acc_dispatcher
     input fu_data_t fu_data_i,
     input scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0] commit_instr_i,
     output logic [CVA6Cfg.TRANS_ID_BITS-1:0] acc_trans_id_o,
+    output logic [CVA6Cfg.XLEN-1:0] acc_pc_o,
     output logic [CVA6Cfg.XLEN-1:0] acc_result_o,
     output logic acc_valid_o,
     output exception_t acc_exception_o,
@@ -174,7 +175,9 @@ module acc_dispatcher
 
   // Keep track of the instructions that were received by the dispatcher.
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] insn_pending_d, insn_pending_q;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0][CVA6Cfg.XLEN-1:0] acc_pc_pending_d, acc_pc_pending_q;
   `FF(insn_pending_q, insn_pending_d, '0)
+  `FF(acc_pc_pending_q, acc_pc_pending_d, '0)
 
   // Only non-speculative instructions can be issued to the accelerators.
   // The following block keeps track of which transaction IDs reached the
@@ -186,20 +189,31 @@ module acc_dispatcher
     // Maintain state
     insn_pending_d = insn_pending_q;
     insn_ready_d   = insn_ready_q;
+    acc_pc_pending_d = acc_pc_pending_q;
 
     // We received a new instruction
-    if (acc_valid_q) insn_pending_d[acc_data.trans_id] = 1'b1;
+    if (acc_valid_q) begin
+      insn_pending_d[acc_data.trans_id] = 1'b1;
+      acc_pc_pending_d[acc_data.trans_id] = issue_instr_i.pc;
+    end
     // Flush all received instructions
-    if (flush_ex_i) insn_pending_d = '0;
+    if (flush_ex_i) begin
+      insn_pending_d = '0;
+      acc_pc_pending_d = '0;
+    end
 
     // An accelerator instruction is no longer speculative.
     if (acc_commit && insn_pending_q[acc_commit_trans_id]) begin
       insn_ready_d[acc_commit_trans_id]   = 1'b1;
       insn_pending_d[acc_commit_trans_id] = 1'b0;
+      acc_pc_pending_d[acc_commit_trans_id] = '0;
     end
 
     // An accelerator instruction was issued.
-    if (acc_req_o.acc_req.req_valid) insn_ready_d[acc_req_o.acc_req.trans_id] = 1'b0;
+    if (acc_req_o.acc_req.req_valid) begin
+      insn_ready_d[acc_req_o.acc_req.trans_id] = 1'b0;
+      acc_pc_pending_d[acc_req_o.acc_req.trans_id] = issue_instr_i.pc;
+    end
   end : p_non_speculative_ff
 
   /*************************
@@ -280,6 +294,7 @@ module acc_dispatcher
   logic acc_st_disp;
 
   assign acc_trans_id_o = acc_resp_i.acc_resp.trans_id;
+  assign acc_pc_o = acc_req_valid ? acc_pc_pending_q[acc_insn_queue_o.trans_id] : '0;
   assign acc_result_o = acc_resp_i.acc_resp.result;
   assign acc_valid_o = acc_resp_i.acc_resp.resp_valid;
   assign acc_exception_o = acc_resp_i.acc_resp.exception;

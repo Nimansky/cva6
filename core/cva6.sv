@@ -343,6 +343,8 @@ module cva6
     output rvfi_probes_t rvfi_probes_o,
     // CVXIF request - SUBSYSTEM
     output cvxif_req_t cvxif_req_o,
+    // Trace-only sideband carrying the PC associated with the accelerator request
+    output logic [CVA6Cfg.XLEN-1:0] vtrace_pc_o,
     // CVXIF response - SUBSYSTEM
     input cvxif_resp_t cvxif_resp_i,
     // noc request, can be AXI or OpenPiton - SUBSYSTEM
@@ -494,6 +496,7 @@ module cva6
   scoreboard_entry_t issue_instr_id_acc;
   logic issue_instr_hs_id_acc;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] acc_trans_id_ex_id;
+  logic [CVA6Cfg.XLEN-1:0] acc_pc_ex_id;
   logic [CVA6Cfg.XLEN-1:0] acc_result_ex_id;
   logic acc_valid_ex_id;
   exception_t acc_exception_ex_id;
@@ -515,6 +518,8 @@ module cva6
   logic x_issue_ready_ex_id;
   logic [31:0] x_off_instr_id_ex;
   logic x_transaction_rejected;
+  assign vtrace_pc_o = acc_pc_ex_id;
+
   // --------------
   // EX <-> COMMIT
   // --------------
@@ -1639,6 +1644,7 @@ module cva6
         .commit_instr_i        (commit_instr_id_commit),
         .commit_st_barrier_i   (fence_i_commit_controller | fence_commit_controller),
         .acc_trans_id_o        (acc_trans_id_ex_id),
+        .acc_pc_o              (acc_pc_ex_id),
         .acc_result_o          (acc_result_ex_id),
         .acc_valid_o           (acc_valid_ex_id),
         .acc_exception_o       (acc_exception_ex_id),
@@ -1662,6 +1668,7 @@ module cva6
   end : gen_accelerator
   else begin : gen_no_accelerator
     assign acc_trans_id_ex_id         = '0;
+    assign acc_pc_ex_id               = '0;
     assign acc_result_ex_id           = '0;
     assign acc_valid_ex_id            = '0;
     assign acc_exception_ex_id        = '0;
