@@ -206,13 +206,11 @@ module acc_dispatcher
     if (acc_commit && insn_pending_q[acc_commit_trans_id]) begin
       insn_ready_d[acc_commit_trans_id]   = 1'b1;
       insn_pending_d[acc_commit_trans_id] = 1'b0;
-      acc_pc_pending_d[acc_commit_trans_id] = '0;
     end
 
     // An accelerator instruction was issued.
     if (acc_req_o.acc_req.req_valid) begin
       insn_ready_d[acc_req_o.acc_req.trans_id] = 1'b0;
-      acc_pc_pending_d[acc_req_o.acc_req.trans_id] = issue_instr_i.pc;
     end
   end : p_non_speculative_ff
 
