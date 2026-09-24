@@ -131,6 +131,46 @@ module acc_dispatcher
     endcase
   end
 
+  /************************************
+  *  Trace PC association            *
+  ************************************/
+
+  // The accelerator request interface does not contain the PC.
+  //
+  // Keep the PC as trace-side metadata, indexed by the transaction ID.
+  // The association is created when the accelerator instruction is accepted
+  // by the issue stage:
+  //
+  //     issue_instr_i.trans_id -> issue_instr_i.pc
+  //
+  // The CVXIF request itself remains completely unchanged.
+
+  logic [CVA6Cfg.XLEN-1:0]
+      acc_pc_table_q [CVA6Cfg.NR_SB_ENTRIES];
+
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] acc_pc_valid_q;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      acc_pc_valid_q <= '0;
+
+      for (int i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
+        acc_pc_table_q[i] <= '0;
+      end
+    end else if (flush_ex_i) begin
+      // Any speculative accelerator instruction which has not yet been
+      // dispatched is discarded. Invalidate the corresponding PC metadata.
+      acc_pc_valid_q <= '0;
+    end else begin
+      // Capture the PC at the same point at which the accelerator
+      // instruction is accepted by the issue stage.
+      if (acc_valid_d) begin
+        acc_pc_table_q[issue_instr_i.trans_id] <= issue_instr_i.pc;
+        acc_pc_valid_q[issue_instr_i.trans_id] <= 1'b1;
+      end
+    end
+  end
+
   /***********************
    *  Instruction queue  *
    ***********************/
@@ -175,9 +215,7 @@ module acc_dispatcher
 
   // Keep track of the instructions that were received by the dispatcher.
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] insn_pending_d, insn_pending_q;
-  logic [CVA6Cfg.NR_SB_ENTRIES-1:0][CVA6Cfg.XLEN-1:0] acc_pc_pending_d, acc_pc_pending_q;
   `FF(insn_pending_q, insn_pending_d, '0)
-  `FF(acc_pc_pending_q, acc_pc_pending_d, '0)
 
   // Only non-speculative instructions can be issued to the accelerators.
   // The following block keeps track of which transaction IDs reached the
@@ -189,17 +227,14 @@ module acc_dispatcher
     // Maintain state
     insn_pending_d = insn_pending_q;
     insn_ready_d   = insn_ready_q;
-    acc_pc_pending_d = acc_pc_pending_q;
 
     // We received a new instruction
     if (acc_valid_q) begin
       insn_pending_d[acc_data.trans_id] = 1'b1;
-      acc_pc_pending_d[acc_data.trans_id] = issue_instr_i.pc;
     end
     // Flush all received instructions
     if (flush_ex_i) begin
       insn_pending_d = '0;
-      acc_pc_pending_d = '0;
     end
 
     // An accelerator instruction is no longer speculative.
@@ -244,6 +279,73 @@ module acc_dispatcher
   assign acc_req_o.acc_req.store_pending = !acc_no_st_pending_i && acc_cons_en_i;
   assign acc_req_o.acc_req.acc_cons_en   = acc_cons_en_i;
   assign acc_req_o.acc_req.inval_ready   = inval_ready_i;
+
+  // --------------------------------------------------------------------------
+  // Trace PC sideband
+  //
+  // This is a completely independent sideband path. It does not modify
+  // acc_req_t.
+  //
+  // The PC is looked up using the transaction ID of the exact instruction
+  // currently being converted into an accelerator request.
+  //
+  // It then passes through a spill register with the exact same valid/ready
+  // handshake as the accelerator request spill register.
+  //
+  // Consequently:
+  //
+  //   acc_req_o.acc_req.req_valid == 1
+  //
+  // implies that:
+  //
+  //   acc_pc_o
+  //
+  // belongs to:
+  //
+  //   acc_req_o.acc_req.trans_id
+  // --------------------------------------------------------------------------
+
+  logic [CVA6Cfg.XLEN-1:0] acc_pc;
+  logic [CVA6Cfg.XLEN-1:0] acc_pc_int;
+  logic                     acc_pc_valid;
+  logic                     acc_pc_ready;
+
+  always_comb begin : trace_pc_dispatcher
+    acc_pc       = '0;
+    acc_pc_valid = 1'b0;
+
+    if (!acc_insn_queue_empty) begin
+      acc_pc       = acc_pc_table_q[acc_insn_queue_o.trans_id];
+      acc_pc_valid = acc_pc_valid_q[acc_insn_queue_o.trans_id];
+
+      // The PC metadata must exist for every accelerator instruction that
+      // reaches this point.
+      if (!acc_pc_valid) begin
+        acc_pc = '0;
+      end
+    end
+  end
+
+  spill_register #(
+      .T(logic [CVA6Cfg.XLEN-1:0])
+  ) i_accelerator_pc_register (
+      .clk_i  (clk_i),
+      .rst_ni (rst_ni),
+      .data_i (acc_pc),
+      .valid_i(acc_req_valid && acc_pc_valid),
+      .ready_o(acc_pc_ready),
+      .data_o (acc_pc_int),
+      .valid_o(/* PC validity follows accelerator request */),
+      .ready_i(acc_resp_i.acc_resp.req_ready)
+  );
+
+  // The request and PC sideband registers must see the same backpressure.
+  //
+  // Since both registers are driven from the same request valid and the same
+  // accelerator ready signal, they advance together.
+  //
+  // The PC is only meaningful while the accelerator request is valid.
+  assign acc_pc_o = acc_req_o.acc_req.req_valid ? acc_pc_int : '0;
 
   // MMU interface
   assign acc_req_o.acc_mmu_resp          = acc_mmu_resp_i;
@@ -292,7 +394,6 @@ module acc_dispatcher
   logic acc_st_disp;
 
   assign acc_trans_id_o = acc_resp_i.acc_resp.trans_id;
-  assign acc_pc_o = acc_req_valid ? acc_pc_pending_q[acc_insn_queue_o.trans_id] : '0;
   assign acc_result_o = acc_resp_i.acc_resp.result;
   assign acc_valid_o = acc_resp_i.acc_resp.resp_valid;
   assign acc_exception_o = acc_resp_i.acc_resp.exception;
